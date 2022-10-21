@@ -52,7 +52,7 @@ def train(epoch, loader, model, optimizer, device):
             loader.set_description(
                 f"epoch: {epoch + 1} - loss: {part_loss:.5f} - acc: {acc:.2f} - lr: {lr:.5f}"
             )
-
+            # TODO: continue here
             if it % 100 == 0:
                 model.eval()
 
