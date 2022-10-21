@@ -26,7 +26,7 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from vit.model import ViT
-from dataloader import CIFAR10
+from dataloader import DummyDataset
 
 
 def setup(rank, world_size):

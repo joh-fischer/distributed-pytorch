@@ -20,7 +20,7 @@
 import torch
 import torch.nn as nn
 
-from models.vit.attention import MultiHeadAttention
+from vit.attention import MultiHeadAttention
 
 
 class TransformerBlock(nn.Module):
