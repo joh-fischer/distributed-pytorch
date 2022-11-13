@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 ```
 
+### Main worker
 First, you need to specify a main worker. This function is executed on every GPU.
 
 ```python
@@ -61,6 +62,7 @@ def main_worker(gpu, world_size, args):
     dist.cleanup()
 ```
 
+### Training
 Then you can specify the trainings loop.
 
 ```python
@@ -98,6 +100,7 @@ def train(model, loader, criterion, optimizer, device):
                   f" - loss: {loss.cpu().item():.4f}")
 ```
 
+### Main
 Now we only need to start the whole procedure.
 
 ```python
@@ -113,6 +116,20 @@ if __name__ == "__main__":
     # If multiple GPUs are available, it starts the main_worker function on every GPU.
     # Otherwise, it just starts the main_worker once, either on CPU or a single GPU.
     dist.launch(main_worker, args)
+```
+
+### Usage
+
+Run `min_DDP.py` with the following command on a multi-gpu machine
+```
+CUDA_VISIBLE_DEVICES="2,3" python3 min_DDP.py
+```
+
+The machine then only uses GPU 2 and 3 for training (attention: index starts at 0).
+
+To run the example on a single, specific GPU, just enter
+```
+python3 min_DDP.py --gpu 3
 ```
 
 In case the training gets interrupted without freeing the port, run
