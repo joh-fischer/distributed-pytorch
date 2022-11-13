@@ -4,7 +4,7 @@ import torch
 from torch import distributed as dist
 from torch import multiprocessing as mp
 
-import distributed as dist_fn
+from sandbox import distributed as dist_fn
 
 
 def find_free_port():
@@ -87,6 +87,6 @@ def distributed_worker(
         pg = dist.new_group(ranks_on_i)
 
         if i == machine_rank:
-            dist_fn.distributed.LOCAL_PROCESS_GROUP = pg
+            sandbox.distributed.distributed.LOCAL_PROCESS_GROUP = pg
 
     fn(*args)

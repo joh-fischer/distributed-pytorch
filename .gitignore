@@ -1,12 +1,7 @@
 .idea
 venv
 
-
 *__pycache__*
 *.swp
 
-data
-datasamples
-
-# logs and checkpoints
-runs
+sandbox

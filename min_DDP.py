@@ -1,5 +1,5 @@
 import os
-import sys
+
 os.environ["CUDA_VISIBLE_DEVICES"]="6,7"
 
 import argparse
@@ -8,41 +8,29 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-from tqdm import tqdm
-
 # DDP stuff
 from torch.nn.parallel import DistributedDataParallel as DDP
 import distributed as dist
 
-# own stuff
-from hip import HierarchicalPerceiver, ConvHierarchicalPerceiver
-from config import HPARAMS_REGISTRY
-from utils import Logger
 
-# Parameters ####################
-BATCH_SIZE = 8
-DATA_SIZE = BATCH_SIZE * 2 + 12
-EPOCHS = 2
-DUMMY = True
-CFG = 'hip16'
-#################################
-
-""" kill processes with
-kill $(ps aux | grep multiprocessing.spawn | grep -v grep | awk '{print $2}')
-"""
-
-parser = argparse.ArgumentParser(description='PyTorch Training')
+parser = argparse.ArgumentParser(description='PyTorch Multi-GPU Training')
 parser.add_argument('--gpu', default=None, type=int, metavar='GPU',
-                    help='If GPU is available, which GPU to use for training.')
+                    help='Specify GPU for single GPU training. If not specified, it runs on all '
+                         'CUDA_VISIBLE_DEVICES.')
+parser.add_argument('--epochs', default=2, type=int, metavar='N',
+                    help='Number of training epochs.')
+parser.add_argument('--batch-size', default=8, type=int, metavar='N',
+                    help='Batch size.')
+parser.add_argument('--update-freq', default=1, type=int, metavar='N',
+                    help='Gradient accumulation steps.')
 
-# config
-if DUMMY:
-    IM_SIZE = 128
-    CLASSES = 100
-else:
-    H = HPARAMS_REGISTRY[CFG]
-    IM_SIZE = H.im_size
-    CLASSES = H.n_classes
+# data
+parser.add_argument('--n-classes', default=100, type=int, metavar='N',
+                    help='Number of classes for fake dataset.')
+parser.add_argument('--data-size', default=None, type=int, metavar='N',
+                    help='Size of fake dataset. If None (default), it is 2 times bs.')
+parser.add_argument('--image-size', default=64, type=int, metavar='N',
+                    help='Size of input images.')
 
 
 class DummyDataset(Dataset):
@@ -60,9 +48,9 @@ class DummyDataset(Dataset):
 
 
 class DummyModel(nn.Module):
-    def __init__(self, n_classes, im_size, in_channels=3):
+    def __init__(self, n_classes, in_channels=3):
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, 64, kernel_size=im_size)
+        self.conv = nn.Conv2d(in_channels, 64, kernel_size=7)
         self.lin = nn.Linear(64, n_classes)
 
     def forward(self, x):
@@ -73,137 +61,96 @@ class DummyModel(nn.Module):
         return x
 
 
-def setup_model():
-    if DUMMY:
-        return DummyModel(CLASSES, IM_SIZE)
-    else:
-        return ConvHierarchicalPerceiver(H) if H.conv else HierarchicalPerceiver(H)
-
-
 # Main workers ##################
-def main_worker(gpu, world_size, args, dummy):
+def main_worker(gpu, world_size, args):
     args.gpu = gpu
     
     if args.distributed:
         dist.init_process_group(gpu, world_size)
 
+    """ Data """
+    dataset = DummyDataset(args.data_size, args.image_size, args.n_classes)
+    sampler = dist.data_sampler(dataset, args.distributed, shuffle=False)
+    loader = DataLoader(dataset, batch_size=args.batch_size,
+                        shuffle=(sampler is None), sampler=sampler)
 
     """ Model """
-    model = setup_model()
+    model = DummyModel(args.n_classes)
 
     # determine device
     if not torch.cuda.is_available():               # cpu
         device = torch.device('cpu')
-    # single or multi gpu
-    else:                                           # gpu
+    else:                                           # single or multi gpu
         device = torch.device(f'cuda:{args.gpu}')
     model.to(device)
-    
+
     if args.distributed:
         model = DDP(model, device_ids=[args.gpu])
 
+    """ Optimizer and Loss """
     # optimizer and loss
     optimizer = torch.optim.AdamW(model.parameters(), 0.0001)
     criterion = nn.CrossEntropyLoss().to(device)
 
-    """ Data """
-    dataset = DummyDataset(DATA_SIZE, IM_SIZE, CLASSES)
-    sampler = dist.data_sampler(dataset, args.distributed, shuffle=True)
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE,
-                        shuffle=(sampler is None), sampler=sampler)
-
-    """ Logging """
-    logger = Logger() if dist.is_primary() else None
-
     """ Run Epochs """
-    for epoch in range(EPOCHS):
+    for epoch in range(args.epochs):
         if dist.is_primary():
             print(f"------- Epoch {epoch+1} - rank {gpu}")
-            logger.init_epoch(epoch)
         
         if args.distributed:
             sampler.set_epoch(epoch)
 
         # training
-        train(model, loader, criterion, optimizer, device, args, logger)
-
-        # validate
-
-        if args.distributed:
-            dist.synchronize()
-        
-        if logger is not None:
-            logger.end_epoch()
-
-    if logger is not None:
-        logger.save()
+        train(model, loader, criterion, optimizer, device, args)
 
     # kill process group
     dist.cleanup()
 
 
-def train(model, loader, criterion, optimizer, device, args, logger):
+def train(model, loader, criterion, optimizer, device, args):
     model.train()
+    optimizer.zero_grad()
 
-    # if dist.is_primary():
-    #     loader = tqdm(loader, desc=f"Rank {dist.get_rank()}")
     for it, (x, y) in enumerate(loader):
         x, y = x.to(device), y.to(device)
 
         y_hat = model(x)
     
         loss = criterion(y_hat, y)
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         correct = torch.argmax(y_hat, dim=1).eq(y).sum()
         n = y.shape[0]
-        acc = correct / n
 
-        # output
-        if dist.is_primary():
-            print(f"-- Iteration {it}")
-        
-        # output on every rank
+        # metrics per gpu/process
         print(f"Device:\t{x.device}"
               f"\n\tInput: \t{x.shape}"
               f"\n\tLoss:  \t{loss.cpu().item():.5f}"
-              f"\n\tAcc:   \t{correct / n:.5f}"
-              f"\n\tCorr:  \t{correct}"
-              f"\n\tN:     \t{n}"
-              f"\n\tlabels:\t{y.tolist()}"
-              f"\n\tpred:  \t{torch.argmax(y_hat, dim=1).tolist()}")
+              f"\n\tAcc:   \t{correct / n:.5f} ({correct}/{n})")
 
-        # synchronize all metrics
+        # synchronize metrics across gpus/processes
         loss = dist.reduce(loss)
         correct = dist.reduce(correct)
         n = dist.reduce(torch.tensor(n).to(device))
         acc = correct / n
 
-        # if dist.is_primary():
-        #     loader.set_description("hi")
-
+        # metrics over all gpus, printed only on the main process
         if dist.is_primary():
-            print(f"Main worker"
-                  f" - N: {n}"
-                  f" - corr: {correct}"
-                  f" - acc: {acc.cpu().item():.4f}"
-                  f" - loss: {loss.cpu().detach().item():.4f}")
-
-        if logger is not None:
-            logger.log_metrics({'loss': loss, 'acc': acc},
-                               phase='train', aggregate=True, n=x.shape[0])
+            print(f"Total"
+                  f" - acc: {acc.cpu().item():.4f} ({correct}/{n})"
+                  f" - loss: {loss.cpu().item():.4f}")
 
 
-def main():         # one process
+if __name__ == "__main__":
+    # only run once
     args = parser.parse_args()
     for name, val in vars(args).items():
         print("{:<12}: {}".format(name, val))
 
-    dist.launch(main_worker, args, None)
-
-
-if __name__ == "__main__":
-    main()
+    # start different processes, if multi-gpu is available
+    # otherwise, it just starts the main_worker once
+    dist.launch(main_worker, args)
     

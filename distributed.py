@@ -34,19 +34,22 @@ def launch(worker_fn, args):
 
     if args.distributed:
         if args.distributed and "CUDA_VISIBLE_DEVICES" not in os.environ:
-            raise ValueError("GPUs not specified. Please set CUDA_VISIBLE_DEVICES before running the script or specify a single GPU via '--gpu'.")
+            raise ValueError("GPUs not specified. Please set CUDA_VISIBLE_DEVICES before"
+                             " running the script or specify a single GPU via '--gpu'.")
 
         os.environ["NCCL_P2P_DISABLE"] = "1"
         mp.spawn(worker_fn, args=(world_size, args),
                  nprocs=world_size, join=True)
-    else:
+    elif args.single_gpu:
         worker_fn(args.gpu, world_size, args)
-    
+    else:
+        worker_fn(0, world_size, args)
+
 
 # distributed trainings functions
-def init_process_group(rank, world_size, backend='nccl'):
+def init_process_group(rank, world_size, port='12352', backend='nccl'):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    os.environ['MASTER_PORT'] = port
 
     dist.init_process_group(backend, init_method="env://",
                             rank=rank, world_size=world_size)
@@ -85,19 +88,25 @@ def get_world_size():
 # data loading stuff
 def data_sampler(dataset, distributed, shuffle):
     if distributed:
-        return DistributedSampler(dataset, shuffle=True, )
-    
+        return DistributedSampler(dataset, shuffle=shuffle)
+
     return None
 
 
 # synchronization functions
-def all_reduce(tensor, op=dist.ReduceOp.SUM):
+def all_reduce(tensor, op='sum'):
     world_size = get_world_size()
 
     if world_size == 1:
         return tensor
 
-    dist.all_reduce(tensor, op=op)
+    if op == 'sum':
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    elif op == 'avg':
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        tensor /= dist.get_world_size()
+    else:
+        raise ValueError(f'"{op}" is an invalid reduce operation!')
 
     return tensor
 
@@ -136,3 +145,37 @@ def synchronize():
         return
 
     dist.barrier()
+
+
+# metrics
+class AverageMeter:
+    def __init__(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        val = self._handle_value(val)
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+    @staticmethod
+    def _handle_value(value):
+        if isinstance(value, torch.Tensor):
+            return value.item()
+        return value
+
+    def synchronize_between_processes(self):
+        if is_dist_avail_and_initialized():
+            return
+
+        t = torch.tensor([self.sum, self.count], dtype=torch.float64, device='cuda')
+        dist.barrier()
+        dist.all_reduce(t)
+        t = t.tolist()
+        self.sum = t[0]
+        self.count = int(t[1])
+        self.avg = self.sum / self.count

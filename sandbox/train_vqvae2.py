@@ -10,10 +10,10 @@ from torchvision import datasets, transforms, utils
 
 from tqdm import tqdm
 
-import distributed as dist
+from sandbox import distributed as dist
+
 
 # my stuff
-from required_fns import get_model
 
 
 def train(epoch, loader, model, optimizer, device):
