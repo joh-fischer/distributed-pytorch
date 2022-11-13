@@ -145,37 +145,3 @@ def synchronize():
         return
 
     dist.barrier()
-
-
-# metrics
-class AverageMeter:
-    def __init__(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        val = self._handle_value(val)
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
-
-    @staticmethod
-    def _handle_value(value):
-        if isinstance(value, torch.Tensor):
-            return value.item()
-        return value
-
-    def synchronize_between_processes(self):
-        if is_dist_avail_and_initialized():
-            return
-
-        t = torch.tensor([self.sum, self.count], dtype=torch.float64, device='cuda')
-        dist.barrier()
-        dist.all_reduce(t)
-        t = t.tolist()
-        self.sum = t[0]
-        self.count = int(t[1])
-        self.avg = self.sum / self.count
