@@ -104,7 +104,7 @@ def all_reduce(tensor, op='sum'):
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     elif op == 'avg':
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
-        tensor /= dist.get_world_size()
+        tensor /= get_world_size()
     else:
         raise ValueError(f'"{op}" is an invalid reduce operation!')
 
