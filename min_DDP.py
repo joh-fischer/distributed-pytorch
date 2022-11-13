@@ -1,6 +1,6 @@
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3,4"
+os.environ["CUDA_VISIBLE_DEVICES"] = "6,7"
 
 import argparse
 
@@ -27,8 +27,8 @@ parser.add_argument('--update-freq', default=1, type=int, metavar='N',
 # data
 parser.add_argument('--n-classes', default=100, type=int, metavar='N',
                     help='Number of classes for fake dataset.')
-parser.add_argument('--data-size', default=None, type=int, metavar='N',
-                    help='Size of fake dataset. If None (default), it is 2 times bs.')
+parser.add_argument('--data-size', default=32, type=int, metavar='N',
+                    help='Size of fake dataset.')
 parser.add_argument('--image-size', default=64, type=int, metavar='N',
                     help='Size of input images.')
 
