@@ -1,6 +1,6 @@
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"]="6,7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3,4"
 
 import argparse
 
@@ -101,13 +101,13 @@ def main_worker(gpu, world_size, args):
             sampler.set_epoch(epoch)
 
         # training
-        train(model, loader, criterion, optimizer, device, args)
+        train(model, loader, criterion, optimizer, device)
 
     # kill process group
     dist.cleanup()
 
 
-def train(model, loader, criterion, optimizer, device, args):
+def train(model, loader, criterion, optimizer, device):
     model.train()
     optimizer.zero_grad()
 
