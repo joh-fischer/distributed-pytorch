@@ -1,7 +1,4 @@
 import os
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "6,7"
-
 import argparse
 
 import torch
@@ -12,16 +9,18 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 import distributed as dist
 
+from helpers import *
+
 
 parser = argparse.ArgumentParser(description='PyTorch Multi-GPU Training')
 parser.add_argument('--gpu', default=None, type=int, metavar='GPU',
                     help='Specify GPU for single GPU training. If not specified, it runs on all '
                          'CUDA_VISIBLE_DEVICES.')
-parser.add_argument('--epochs', default=2, type=int, metavar='N',
+parser.add_argument('--epochs', default=1, type=int, metavar='N',
                     help='Number of training epochs.')
 parser.add_argument('--batch-size', default=8, type=int, metavar='N',
                     help='Batch size.')
-parser.add_argument('--update-freq', default=1, type=int, metavar='N',
+parser.add_argument('--update-freq', default=2, type=int, metavar='N',
                     help='Gradient accumulation steps.')
 
 # data
@@ -103,7 +102,7 @@ def main_worker(gpu, world_size, args):
             sampler.set_epoch(epoch)
 
         # training
-        train(model, loader, criterion, optimizer, device, update_freq)
+        train(model, loader, criterion, optimizer, device, args.update_freq)
 
     # kill process group
     dist.cleanup()
@@ -113,37 +112,61 @@ def train(model, loader, criterion, optimizer, device, update_freq):
     model.train()
     optimizer.zero_grad()
 
+    acc_meter = dist.AverageMeter()
+    loss_meter = dist.AverageMeter()
+
     for it, (x, y) in enumerate(loader):
         x, y = x.to(device), y.to(device)
 
         y_hat = model(x)
-    
+
+        # loss
         loss = criterion(y_hat, y)
-
-        optimizer.zero_grad()
+        loss = loss / update_freq
         loss.backward()
-        optimizer.step()
 
+        loss_meter.update(loss, y.shape[0])
+
+        # accuracy
         correct = torch.argmax(y_hat, dim=1).eq(y).sum()
         n = y.shape[0]
+        acc = correct / n
+        acc_meter.update(acc, n)
 
         # metrics per gpu/process
         print(f"Device: {x.device}"
-              f"\n\tInput: \t{x.shape}"
               f"\n\tLoss:  \t{loss.cpu().item():.5f}"
-              f"\n\tAcc:   \t{correct / n:.5f} ({correct}/{n})")
+              f"\n\tLMeter:\t{loss_meter.avg:.5f}")
+
+        dist.synchronize()
+
+        if dist.is_primary():
+            print(f"Finish iteration {(it % update_freq) + 1} / {update_freq}")
+        
+        # continue if step is not complete
+        if not (it + 1) % update_freq == 0:
+            continue
+        
+        if dist.is_primary():
+            print("Update step")
+        optimizer.step()
+        optimizer.zero_grad()
 
         # synchronize metrics across gpus/processes
-        loss = dist.reduce(loss)
-        correct = dist.reduce(correct)
-        n = dist.reduce(torch.tensor(n).to(device))
-        acc = correct / n
+        acc_meter.synchronize_between_processes()
+        loss_meter.synchronize_between_processes()
+
 
         # metrics over all gpus, printed only on the main process
         if dist.is_primary():
-            print(f"Finish iteration {it}"
-                  f" - acc: {acc.cpu().item():.4f} ({correct}/{n})"
-                  f" - loss: {loss.cpu().item():.4f}")
+            print(f"Finish complete step"
+                  f" - acc: {acc_meter.avg:.4f}"
+                  f" - loss: {running_loss:.4f}"
+                  f" - loss_meter: {loss_meter.avg:.4f}"
+                  "\n------")
+
+        acc_meter.reset()
+        loss_meter.reset()
 
 
 if __name__ == "__main__":

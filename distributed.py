@@ -104,20 +104,26 @@ def all_reduce(tensor, op='sum'):
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     elif op == 'avg':
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
-        tensor /= dist.get_world_size()
+        tensor /= get_world_size()
     else:
         raise ValueError(f'"{op}" is an invalid reduce operation!')
 
     return tensor
 
 
-def reduce(tensor, op=dist.ReduceOp.SUM):
+def reduce(tensor, op='sum'):
     world_size = get_world_size()
 
     if world_size == 1:
         return tensor
 
-    dist.reduce(tensor, dst=0, op=op)
+    if op == 'sum':
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    elif op == 'avg':
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        tensor /= get_world_size()
+    else:
+        raise ValueError(f'"{op}" is an invalid reduce operation!')
 
     return tensor
 
@@ -150,9 +156,9 @@ def synchronize():
 # metrics
 class AverageMeter:
     def __init__(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
+        self.val = 0.
+        self.avg = 0.
+        self.sum = 0.
         self.count = 0
 
     def update(self, val, n=1):
@@ -162,6 +168,12 @@ class AverageMeter:
         self.count += n
         self.avg = self.sum / self.count
 
+    def reset(self):
+        self.val = 0.
+        self.avg = 0.
+        self.sum = 0.
+        self.count = 0
+
     @staticmethod
     def _handle_value(value):
         if isinstance(value, torch.Tensor):
@@ -169,13 +181,11 @@ class AverageMeter:
         return value
 
     def synchronize_between_processes(self):
-        if is_dist_avail_and_initialized():
+        if not is_dist_avail_and_initialized():
             return
 
-        t = torch.tensor([self.sum, self.count], dtype=torch.float64, device='cuda')
-        dist.barrier()
-        dist.all_reduce(t)
-        t = t.tolist()
-        self.sum = t[0]
-        self.count = int(t[1])
+        total = torch.tensor([self.sum, self.count], dtype=torch.float64, device=f'cuda:{get_rank()}')
+        dist.all_reduce(total, dist.ReduceOp.SUM, async_op=False)
+        self.sum, self.count = total.tolist()
         self.avg = self.sum / self.count
+    
