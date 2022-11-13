@@ -21,8 +21,6 @@ parser.add_argument('--epochs', default=2, type=int, metavar='N',
                     help='Number of training epochs.')
 parser.add_argument('--batch-size', default=8, type=int, metavar='N',
                     help='Batch size.')
-parser.add_argument('--update-freq', default=1, type=int, metavar='N',
-                    help='Gradient accumulation steps.')
 
 # data
 parser.add_argument('--n-classes', default=10, type=int, metavar='N',
