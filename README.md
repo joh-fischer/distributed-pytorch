@@ -1,7 +1,7 @@
 # Distributed PyTorch Training
 
 
-In `min_DDP.py` you can find a minimum working example of a single-node, multi-gpu training with PyTorch.
+In `min_DDP.py` you can find a minimum working example of single-node, multi-gpu training with PyTorch.
 All communication between processes, as well as the multi-process spawn is handled by the functions defined
 in `distributed.py`.
 
@@ -104,16 +104,14 @@ Now we only need to start the whole procedure.
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PyTorch Multi-GPU Training')
     parser.add_argument('--gpu', default=None, type=int, metavar='GPU',
-                        help='Specify GPU for single GPU training. If not specified, it runs on all '
-                             'CUDA_VISIBLE_DEVICES.')
+                        help='Specify GPU for single GPU training. '
+                             'If not specified, it runs on all CUDA_VISIBLE_DEVICES.')
     parser.add_argument('--batch-size', default=8, type=int, metavar='N',
                         help='Per GPU batch size.')
     args = parser.parse_args()
 
-    # If multiple GPUs are available, it starts
-    # the main_worker function on every GPU. Otherwise,
-    # it just starts the main_worker once, either on CPU or a
-    # single GPU.
+    # If multiple GPUs are available, it starts the main_worker function on every GPU.
+    # Otherwise, it just starts the main_worker once, either on CPU or a single GPU.
     dist.launch(main_worker, args)
 ```
 
