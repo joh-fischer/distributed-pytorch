@@ -103,14 +103,15 @@ def main_worker(gpu, world_size, args):
             sampler.set_epoch(epoch)
 
         # training
-        train(model, loader, criterion, optimizer, device)
+        train(model, loader, criterion, optimizer, device, update_freq)
 
     # kill process group
     dist.cleanup()
 
 
-def train(model, loader, criterion, optimizer, device):
+def train(model, loader, criterion, optimizer, device, update_freq):
     model.train()
+    optimizer.zero_grad()
 
     for it, (x, y) in enumerate(loader):
         x, y = x.to(device), y.to(device)
