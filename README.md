@@ -1,8 +1,8 @@
 # Distributed PyTorch Training
 
 
-In `min_DDP.py` you can find a minimum working example of single-node, multi-gpu training with PyTorch.
-The whole launch, multi-process spawn, and process-communication is handled by the functions defined
+In `min_DDP.py` you can find a minimum working example of a single-node, multi-gpu training with PyTorch.
+All communication between processes, as well as the multi-process spawn is handled by the functions defined
 in `distributed.py`.
 
 ```python
@@ -25,8 +25,9 @@ def main_worker(gpu, world_size, args):
 
     """ Data """
     dataset = ...       # your dataset
-    sampler = dist.data_sampler(dataset, args.distributed, shuffle=False)   # returns sampler, if distributed
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=(sampler is None), sampler=sampler)
+    sampler = dist.data_sampler(dataset, args.distributed, shuffle=False)
+    loader = DataLoader(dataset, batch_size=args.batch_size,
+                        shuffle=(sampler is None), sampler=sampler)
 
     """ Model """
     model = ...         # your model
@@ -37,20 +38,18 @@ def main_worker(gpu, world_size, args):
     else:                                           # single or multi gpu
         device = torch.device(f'cuda:{args.gpu}')
     model.to(device)
-    
-    # wrap model in DistributedDataParallel
+
     if args.distributed:
         model = DDP(model, device_ids=[args.gpu])
 
     """ Optimizer and Loss """
-    # optimizer and loss
     optimizer = torch.optim.AdamW(model.parameters(), 0.0001)
     criterion = nn.CrossEntropyLoss().to(device)
 
     """ Run Epochs """
     for epoch in range(args.epochs):
-        if dist.is_primary():       # only print on main process
-            print(f"------- Epoch {epoch+1} - rank {gpu}")
+        if dist.is_primary():
+            print(f"------- Epoch {epoch+1}")
         
         if args.distributed:
             sampler.set_epoch(epoch)
@@ -80,35 +79,41 @@ def train(model, loader, criterion, optimizer, device):
         optimizer.step()
 
         correct = torch.argmax(y_hat, dim=1).eq(y).sum()
-        n = y.shape[0]
+        acc = correct / y.shape[0]
 
-        # metrics per gpu/process
-        print(f"Device:\t{x.device}"
-              f"\n\tInput: \t{x.shape}"
-              f"\n\tLoss:  \t{loss.cpu().item():.5f}"
-              f"\n\tAcc:   \t{correct / n:.5f} ({correct}/{n})")
-
+        # Up until now, all metrics are per gpu/process.  If
+        # we want to get the metrics over all GPUs, we need to
+        # communicate between processes. You can find a nice
+        # visualization of communication here:
+        # https://pytorch.org/tutorials/intermediate/dist_tuto.html
+        
         # synchronize metrics across gpus/processes
         loss = dist.reduce(loss)
-        correct = dist.reduce(correct)
-        n = dist.reduce(torch.tensor(n).to(device))
-        acc = correct / n
+        acc = dist.reduce(acc, 'avg')
 
-        # metrics over all gpus, printed only on the main process
+        # metrics over all gpus, printed only in the main process
         if dist.is_primary():
-            print(f"Total"
+            print(f"Finish iteration {it}"
                   f" - acc: {acc.cpu().item():.4f} ({correct}/{n})"
                   f" - loss: {loss.cpu().item():.4f}")
+```
 
+Now we only need to start the whole procedure.
 
+```python
 if __name__ == "__main__":
-    # only run once
+    parser = argparse.ArgumentParser(description='PyTorch Multi-GPU Training')
+    parser.add_argument('--gpu', default=None, type=int, metavar='GPU',
+                        help='Specify GPU for single GPU training. If not specified, it runs on all '
+                             'CUDA_VISIBLE_DEVICES.')
+    parser.add_argument('--batch-size', default=8, type=int, metavar='N',
+                        help='Per GPU batch size.')
     args = parser.parse_args()
-    for name, val in vars(args).items():
-        print("{:<12}: {}".format(name, val))
 
-    # start different processes, if multi-gpu is available
-    # otherwise, it just starts the main_worker once
+    # If multiple GPUs are available, it starts
+    # the main_worker function on every GPU. Otherwise,
+    # it just starts the main_worker once, either on CPU or a
+    # single GPU.
     dist.launch(main_worker, args)
 ```
 
