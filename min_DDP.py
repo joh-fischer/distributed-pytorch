@@ -25,7 +25,7 @@ parser.add_argument('--update-freq', default=1, type=int, metavar='N',
                     help='Gradient accumulation steps.')
 
 # data
-parser.add_argument('--n-classes', default=100, type=int, metavar='N',
+parser.add_argument('--n-classes', default=10, type=int, metavar='N',
                     help='Number of classes for fake dataset.')
 parser.add_argument('--data-size', default=32, type=int, metavar='N',
                     help='Size of fake dataset.')
@@ -51,10 +51,12 @@ class DummyModel(nn.Module):
     def __init__(self, n_classes, in_channels=3):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, 64, kernel_size=7)
+        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.lin = nn.Linear(64, n_classes)
 
     def forward(self, x):
         x = self.conv(x)
+        x = self.avg_pool(x)
         x = x.view(x.shape[0], -1)
         x = self.lin(x)
 
@@ -95,7 +97,7 @@ def main_worker(gpu, world_size, args):
     """ Run Epochs """
     for epoch in range(args.epochs):
         if dist.is_primary():
-            print(f"------- Epoch {epoch+1} - rank {gpu}")
+            print(f"------- Epoch {epoch+1}")
         
         if args.distributed:
             sampler.set_epoch(epoch)
@@ -109,7 +111,6 @@ def main_worker(gpu, world_size, args):
 
 def train(model, loader, criterion, optimizer, device):
     model.train()
-    optimizer.zero_grad()
 
     for it, (x, y) in enumerate(loader):
         x, y = x.to(device), y.to(device)
@@ -126,7 +127,7 @@ def train(model, loader, criterion, optimizer, device):
         n = y.shape[0]
 
         # metrics per gpu/process
-        print(f"Device:\t{x.device}"
+        print(f"Device: {x.device}"
               f"\n\tInput: \t{x.shape}"
               f"\n\tLoss:  \t{loss.cpu().item():.5f}"
               f"\n\tAcc:   \t{correct / n:.5f} ({correct}/{n})")
@@ -139,7 +140,7 @@ def train(model, loader, criterion, optimizer, device):
 
         # metrics over all gpus, printed only on the main process
         if dist.is_primary():
-            print(f"Total"
+            print(f"Finish iteration {it}"
                   f" - acc: {acc.cpu().item():.4f} ({correct}/{n})"
                   f" - loss: {loss.cpu().item():.4f}")
 
