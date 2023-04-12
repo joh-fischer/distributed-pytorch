@@ -49,7 +49,7 @@ def launch(worker_fn, args):
 
         os.environ["NCCL_P2P_DISABLE"] = "1"
         os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = find_free_port()
+        os.environ['MASTER_PORT'] = str(find_free_port())
 
         mp.spawn(worker_fn, args=(world_size, args),
                  nprocs=world_size, join=True)
