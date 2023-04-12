@@ -19,6 +19,8 @@
 # SOFTWARE.
 import os
 import torch
+import socket
+from contextlib import closing
 
 import torch.multiprocessing as mp
 from torch import distributed as dist
@@ -26,6 +28,14 @@ from torch.utils.data.distributed import DistributedSampler
 
 
 # launch
+def find_free_port():
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(("", 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        port = s.getsockname()[1]
+        return port
+
+
 def launch(worker_fn, args):
     world_size = torch.cuda.device_count()
 
@@ -38,6 +48,9 @@ def launch(worker_fn, args):
                              " running the script or specify a single GPU via '--gpu'.")
 
         os.environ["NCCL_P2P_DISABLE"] = "1"
+        os.environ['MASTER_ADDR'] = 'localhost'
+        os.environ['MASTER_PORT'] = find_free_port()
+
         mp.spawn(worker_fn, args=(world_size, args),
                  nprocs=world_size, join=True)
     elif args.single_gpu:
@@ -47,10 +60,9 @@ def launch(worker_fn, args):
 
 
 # distributed trainings functions
-def init_process_group(rank, world_size, port='12352', backend='nccl'):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = port
-
+def init_process_group(rank, world_size, backend=None):
+    if backend is None:
+        backend = "gloo" if not torch.cuda.is_available() else "nccl"
     dist.init_process_group(backend, init_method="env://",
                             rank=rank, world_size=world_size)
 
@@ -71,8 +83,13 @@ def cleanup():
 def get_rank():
     if not is_dist_avail_and_initialized():
         return 0
-
     return dist.get_rank()
+
+
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device(f"cuda:{get_rank()}")
+    return torch.device("cpu")
 
 
 def is_primary():
