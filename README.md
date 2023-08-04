@@ -2,8 +2,7 @@
 
 
 In `min_DDP.py` you can find a minimum working example of single-node, multi-gpu training with PyTorch.
-All communication between processes, as well as the multi-process spawn is handled by the functions defined
-in `distributed.py`.
+All communication between processes, as well as the multi-process spawn is handled by the functions defined in `distributed.py`.
 
 ```python
 import torch
@@ -14,7 +13,7 @@ from torch.utils.data import DataLoader
 ```
 
 ### Main worker
-First, you need to specify a main worker. This function is executed on every GPU.
+First, you need to specify a main worker. This function is executed on every GPU individually.
 
 ```python
 def main_worker(gpu, world_size):

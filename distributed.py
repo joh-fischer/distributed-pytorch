@@ -37,7 +37,7 @@ def find_free_port():
         return port
 
 
-def launch(worker_fn, *args, **kwargs):
+def launch(worker_fn, *args):
     world_size = torch.cuda.device_count()
 
     if world_size > 1:          # distributed training
@@ -48,14 +48,14 @@ def launch(worker_fn, *args, **kwargs):
         os.environ['MASTER_ADDR'] = 'localhost'
         os.environ['MASTER_PORT'] = str(find_free_port())
 
-        mp.spawn(worker_fn, args=(world_size, *args), kwargs=kwargs,
+        mp.spawn(worker_fn, args=(world_size, *args),
                  nprocs=world_size, join=True)
 
     elif world_size == 1:       # single GPU training
-        worker_fn(0, world_size, *args, **kwargs)
+        worker_fn(0, world_size, *args)
 
     else:                       # CPU training
-        worker_fn(0, world_size, *args, **kwargs)
+        worker_fn(0, world_size, *args)
 
 
 # distributed trainings functions
