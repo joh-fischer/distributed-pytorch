@@ -11,52 +11,46 @@ import torch.nn as nn
 import distributed as dist
 
 from torch.utils.data import DataLoader
-from torch.nn.parallel import DistributedDataParallel as DDP
 ```
 
 ### Main worker
 First, you need to specify a main worker. This function is executed on every GPU.
 
 ```python
-def main_worker(gpu, world_size, args):
-    args.gpu = gpu
-    
-    if args.distributed:
+def main_worker(gpu, world_size):
+    is_distributed = world_size > 1
+    if is_distributed:
         dist.init_process_group(gpu, world_size)
+    
+    # you can either parse your arguments here or in the main function
+    args = parse_args()
+    for name, val in vars(args).items():
+        dist.print_primary("{:<12}: {}".format(name, val))
 
     """ Data """
-    dataset = ...       # your dataset
-    sampler = dist.data_sampler(dataset, args.distributed, shuffle=False)
-    loader = DataLoader(dataset, batch_size=args.batch_size,
-                        shuffle=(sampler is None), sampler=sampler)
+    dataset = DummyDataset(args.data_size, args.n_classes)
+    sampler = dist.data_sampler(dataset, is_distributed, shuffle=False)
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
     """ Model """
-    model = ...         # your model
-
-    # determine device
-    if not torch.cuda.is_available():               # cpu
-        device = torch.device('cpu')
-    else:                                           # single or multi gpu
-        device = torch.device(f'cuda:{args.gpu}')
-    model.to(device)
-
-    if args.distributed:
-        model = DDP(model, device_ids=[args.gpu])
+    model = DummyModel(in_dim=1, hidden_dim=args.hidden_dim, n_classes=args.n_classes)
+    model.to(dist.get_device())
+    model = dist.prepare_ddp_model(model, device_ids=[gpu])
 
     """ Optimizer and Loss """
     optimizer = torch.optim.AdamW(model.parameters(), 0.0001)
-    criterion = nn.CrossEntropyLoss().to(device)
+    criterion = nn.CrossEntropyLoss()
 
     """ Run Epochs """
+    print("Run epochs")
     for epoch in range(args.epochs):
-        if dist.is_primary():
-            print(f"------- Epoch {epoch+1}")
+        dist.print_primary(f"------- Epoch {epoch+1}")
         
-        if args.distributed:
+        if is_distributed:
             sampler.set_epoch(epoch)
 
         # training
-        train(model, loader, criterion, optimizer, device)
+        train(model, loader, criterion, optimizer)
 
     # kill process group
     dist.cleanup()
@@ -66,11 +60,11 @@ def main_worker(gpu, world_size, args):
 Then you can specify the trainings loop.
 
 ```python
-def train(model, loader, criterion, optimizer, device):
+def train(model, loader, criterion, optimizer):
     model.train()
 
     for it, (x, y) in enumerate(loader):
-        x, y = x.to(device), y.to(device)
+        x, y = x.to(dist.get_device()), y.to(dist.get_device())
 
         y_hat = model(x)
     
@@ -80,42 +74,34 @@ def train(model, loader, criterion, optimizer, device):
         loss.backward()
         optimizer.step()
 
-        correct = torch.argmax(y_hat, dim=1).eq(y).sum()
-        acc = correct / y.shape[0]
+        correct = torch.argmax(y_hat, dim=1).eq(y)
+        n = y.shape[0]
 
         # Up until now, all metrics are per gpu/process.  If
         # we want to get the metrics over all GPUs, we need to
         # communicate between processes. You can find a nice
-        # visualization of communication here:
+        # visualization of communication schemes here:
         # https://pytorch.org/tutorials/intermediate/dist_tuto.html
         
         # synchronize metrics across gpus/processes
-        loss = dist.reduce(loss)
-        acc = dist.reduce(acc, 'avg')
+        loss = dist.reduce(loss.detach())               # average loss
+        correct = dist.gather(correct.detach())         # gather all correct predictions
+        correct = torch.cat(correct, dim=0)             # concatenate all correct predictions
+        acc = correct.sum() / correct.numel()           # accuracy over all gpus/processes
 
         # metrics over all gpus, printed only in the main process
         if dist.is_primary():
             print(f"Finish iteration {it}"
-                  f" - acc: {acc.cpu().item():.4f} ({correct}/{n})"
+                  f" - acc: {acc.cpu().item():.4f} ({correct.sum()}/{n})"
                   f" - loss: {loss.cpu().item():.4f}")
 ```
 
 ### Main
-Now we only need to start the whole procedure.
+In the main function we only need to start the whole procedure.
 
 ```python
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='PyTorch Multi-GPU Training')
-    parser.add_argument('--gpu', default=None, type=int, metavar='GPU',
-                        help='Specify GPU for single GPU training. '
-                             'If not specified, it runs on all CUDA_VISIBLE_DEVICES.')
-    parser.add_argument('--batch-size', default=8, type=int, metavar='N',
-                        help='Per GPU batch size.')
-    args = parser.parse_args()
-
-    # If multiple GPUs are available, it starts the main_worker function on every GPU.
-    # Otherwise, it just starts the main_worker once, either on CPU or a single GPU.
-    dist.launch(main_worker, args)
+    dist.launch(main_worker)
 ```
 
 ### Usage
@@ -129,7 +115,7 @@ The machine then only uses GPU 2 and 3 for training (attention: index starts at 
 
 To run the example on a single, specific GPU, just enter
 ```
-python3 min_DDP.py --gpu 3
+CUDA_VISIBLE_DEVICES="2" python3 min_DDP.py
 ```
 
 In case the training gets interrupted without freeing the port, run

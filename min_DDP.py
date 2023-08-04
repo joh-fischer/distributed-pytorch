@@ -1,39 +1,35 @@
-import os
 import argparse
 
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-# DDP stuff
-from torch.nn.parallel import DistributedDataParallel as DDP
 import distributed as dist
 
 
-parser = argparse.ArgumentParser(description='PyTorch Multi-GPU Training')
-parser.add_argument('--gpu', default=None, type=int, metavar='GPU',
-                    help='Specify GPU for single GPU training. If not specified, it runs on all '
-                         'CUDA_VISIBLE_DEVICES.')
-parser.add_argument('--epochs', default=2, type=int, metavar='N',
-                    help='Number of training epochs.')
-parser.add_argument('--batch-size', default=8, type=int, metavar='N',
-                    help='Batch size.')
-
-# data
-parser.add_argument('--n-classes', default=10, type=int, metavar='N',
-                    help='Number of classes for fake dataset.')
-parser.add_argument('--data-size', default=32, type=int, metavar='N',
-                    help='Size of fake dataset.')
-parser.add_argument('--image-size', default=64, type=int, metavar='N',
-                    help='Size of input images.')
+def parse_args():
+    parser = argparse.ArgumentParser(description='PyTorch Multi-GPU Training')
+    parser.add_argument('--epochs', default=2, type=int, metavar='N',
+                        help='Number of training epochs.')
+    parser.add_argument('--batch-size', default=8, type=int, metavar='N',
+                        help='Batch size.')
+    # data
+    parser.add_argument('--n-classes', default=4, type=int, metavar='N',
+                        help='Number of classes for fake dataset.')
+    parser.add_argument('--data-size', default=32, type=int, metavar='N',
+                        help='Size of fake dataset.')
+    parser.add_argument('--hidden-dim', default=32, type=int, metavar='N',
+                        help='Hidden dimension.')
+    args = parser.parse_args()
+    return args
 
 
 class DummyDataset(Dataset):
-    def __init__(self, length, im_size, n_classes):
+    def __init__(self, length, n_classes):
         self.len = length
-        self.data = torch.randn(length, 3, im_size, im_size)
-        self.labels = torch.randint(0, n_classes, (length,),
-                                    generator=torch.Generator().manual_seed(0))
+        gen = torch.Generator().manual_seed(0)
+        self.data = torch.arange(0, length, dtype=torch.float32).unsqueeze(-1)
+        self.labels = torch.randint(0, n_classes, (length,), generator=gen)
 
     def __getitem__(self, idx):
         return self.data[idx], self.labels[idx]
@@ -43,72 +39,60 @@ class DummyDataset(Dataset):
 
 
 class DummyModel(nn.Module):
-    def __init__(self, n_classes, in_channels=3):
+    def __init__(self, in_dim, hidden_dim, n_classes):
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, 64, kernel_size=7)
-        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.lin = nn.Linear(64, n_classes)
+        self.lin1 = nn.Linear(in_dim, hidden_dim)
+        self.lin2 = nn.Linear(hidden_dim, n_classes)
 
     def forward(self, x):
-        x = self.conv(x)
-        x = self.avg_pool(x)
-        x = x.view(x.shape[0], -1)
-        x = self.lin(x)
-
+        x = self.lin2(self.lin1(x))
         return x
 
 
 # Main workers ##################
-def main_worker(gpu, world_size, args):
-    args.gpu = gpu
-    
-    if args.distributed:
+def main_worker(gpu, world_size):
+    is_distributed = world_size > 1
+    if is_distributed:
         dist.init_process_group(gpu, world_size)
 
+    args = parse_args()
+    for name, val in vars(args).items():
+        dist.print_primary("{:<12}: {}".format(name, val))
+
     """ Data """
-    dataset = DummyDataset(args.data_size, args.image_size, args.n_classes)
-    sampler = dist.data_sampler(dataset, args.distributed, shuffle=False)
-    loader = DataLoader(dataset, batch_size=args.batch_size,
-                        shuffle=(sampler is None), sampler=sampler)
+    dataset = DummyDataset(args.data_size, args.n_classes)
+    sampler = dist.data_sampler(dataset, is_distributed, shuffle=False)
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
     """ Model """
-    model = DummyModel(args.n_classes)
-
-    # determine device
-    if not torch.cuda.is_available():               # cpu
-        device = torch.device('cpu')
-    else:                                           # single or multi gpu
-        device = torch.device(f'cuda:{args.gpu}')
-    model.to(device)
-
-    if args.distributed:
-        model = DDP(model, device_ids=[args.gpu])
+    model = DummyModel(in_dim=1, hidden_dim=args.hidden_dim, n_classes=args.n_classes)
+    model.to(dist.get_device())
+    model = dist.prepare_ddp_model(model, device_ids=[gpu])
 
     """ Optimizer and Loss """
-    # optimizer and loss
     optimizer = torch.optim.AdamW(model.parameters(), 0.0001)
-    criterion = nn.CrossEntropyLoss().to(device)
+    criterion = nn.CrossEntropyLoss()
 
     """ Run Epochs """
+    print("Run epochs")
     for epoch in range(args.epochs):
-        if dist.is_primary():
-            print(f"------- Epoch {epoch+1}")
+        dist.print_primary(f"------- Epoch {epoch+1}")
         
-        if args.distributed:
+        if is_distributed:
             sampler.set_epoch(epoch)
 
         # training
-        train(model, loader, criterion, optimizer, device)
+        train(model, loader, criterion, optimizer)
 
     # kill process group
     dist.cleanup()
 
 
-def train(model, loader, criterion, optimizer, device):
+def train(model, loader, criterion, optimizer):
     model.train()
 
     for it, (x, y) in enumerate(loader):
-        x, y = x.to(device), y.to(device)
+        x, y = x.to(dist.get_device()), y.to(dist.get_device())
 
         y_hat = model(x)
     
@@ -118,35 +102,37 @@ def train(model, loader, criterion, optimizer, device):
         loss.backward()
         optimizer.step()
 
-        correct = torch.argmax(y_hat, dim=1).eq(y).sum()
+        correct = torch.argmax(y_hat, dim=1).eq(y)
         n = y.shape[0]
 
         # metrics per gpu/process
         print(f"Device: {x.device}"
-              f"\n\tInput: \t{x.shape}"
-              f"\n\tLoss:  \t{loss.cpu().item():.5f}"
-              f"\n\tAcc:   \t{correct / n:.5f} ({correct}/{n})")
+              f"\n\tInput: \t{x.squeeze().to(torch.uint8)}"
+              f"\n\tLabel: \t{y.squeeze()}"
+              f"\n\tPred:  \t{torch.argmax(y_hat, -1)}"
+              f"\n\tCorr.: \t{correct.to(torch.uint8)}"
+              f"\n\tAcc:   \t{correct.sum() / n:.5f} ({correct.sum()}/{n})"
+              f"\n\tLoss:  \t{loss.cpu().item():.5f}")
+
+        # wait until all processes are at this point
+        dist.wait_for_everyone()
 
         # synchronize metrics across gpus/processes
-        loss = dist.reduce(loss)
-        correct = dist.reduce(correct)
-        n = dist.reduce(torch.tensor(n).to(device))
-        acc = correct / n
+        loss = dist.reduce(loss.detach())               # average loss
+        correct = dist.gather(correct.detach())         # gather all correct predictions
+        correct = torch.cat(correct, dim=0)             # concatenate all correct predictions
+        acc = correct.sum() / correct.numel()           # accuracy over all gpus/processes
 
         # metrics over all gpus, printed only on the main process
-        if dist.is_primary():
-            print(f"Finish iteration {it}"
-                  f" - acc: {acc.cpu().item():.4f} ({correct}/{n})"
-                  f" - loss: {loss.cpu().item():.4f}")
+        dist.print_primary(f"Finish iteration {it}"
+                           f" - acc: {acc.cpu().item():.4f} ({correct.sum()}/{n})"
+                           f" - loss: {loss.cpu().item():.4f}")
 
 
 if __name__ == "__main__":
-    # only run once
-    args = parser.parse_args()
-    for name, val in vars(args).items():
-        print("{:<12}: {}".format(name, val))
+    # code that should only execute once
+    # ...
 
     # start different processes, if multi-gpu is available
     # otherwise, it just starts the main_worker once
-    dist.launch(main_worker, args)
-    
+    dist.launch(main_worker)

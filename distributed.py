@@ -24,6 +24,7 @@ from contextlib import closing
 
 import torch.multiprocessing as mp
 from torch import distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data.distributed import DistributedSampler
 
 
@@ -36,27 +37,25 @@ def find_free_port():
         return port
 
 
-def launch(worker_fn, args):
+def launch(worker_fn, *args, **kwargs):
     world_size = torch.cuda.device_count()
 
-    args.single_gpu = world_size > 0 and args.gpu is not None
-    args.distributed = world_size > 1 and not args.single_gpu
-
-    if args.distributed:
-        if args.distributed and "CUDA_VISIBLE_DEVICES" not in os.environ:
-            raise ValueError("GPUs not specified. Please set CUDA_VISIBLE_DEVICES before"
-                             " running the script or specify a single GPU via '--gpu'.")
+    if world_size > 1:          # distributed training
+        if "CUDA_VISIBLE_DEVICES" not in os.environ:
+            raise ValueError("GPUs not specified. Please set CUDA_VISIBLE_DEVICES.")
 
         os.environ["NCCL_P2P_DISABLE"] = "1"
         os.environ['MASTER_ADDR'] = 'localhost'
         os.environ['MASTER_PORT'] = str(find_free_port())
 
-        mp.spawn(worker_fn, args=(world_size, args),
+        mp.spawn(worker_fn, args=(world_size, *args), kwargs=kwargs,
                  nprocs=world_size, join=True)
-    elif args.single_gpu:
-        worker_fn(args.gpu, world_size, args)
-    else:
-        worker_fn(0, world_size, args)
+
+    elif world_size == 1:       # single GPU training
+        worker_fn(0, world_size, *args, **kwargs)
+
+    else:                       # CPU training
+        worker_fn(0, world_size, *args, **kwargs)
 
 
 # distributed trainings functions
@@ -106,8 +105,14 @@ def get_world_size():
 def data_sampler(dataset, distributed, shuffle):
     if distributed:
         return DistributedSampler(dataset, shuffle=shuffle)
-
     return None
+
+
+# model wrapping
+def prepare_ddp_model(model, device_ids, *args, **kwargs):
+    if get_world_size() > 1:
+        model = DistributedDataParallel(model, device_ids=device_ids, *args, **kwargs)
+    return model
 
 
 # synchronization functions
@@ -155,10 +160,28 @@ def gather(data):
     return output_list
 
 
-def synchronize():
-    world_size = get_world_size()
+def sync_params(params):
+    """
+    Synchronize a sequence of Tensors across ranks from rank 0.
+    """
+    if is_dist_avail_and_initialized():
+        for p in params:
+            with torch.no_grad():
+                dist.broadcast(p, 0)
 
+
+def barrier():
+    world_size = get_world_size()
     if world_size == 1:
         return
-
     dist.barrier()
+
+
+# wrapper with same functionality but better readability as barrier
+def wait_for_everyone():
+    barrier()
+
+
+def print_primary(*args, **kwargs):
+    if is_primary():
+        print(*args, **kwargs)
