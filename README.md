@@ -29,7 +29,8 @@ def main_worker(gpu, world_size):
     """ Data """
     dataset = DummyDataset(args.data_size, args.n_classes)
     sampler = dist.data_sampler(dataset, is_distributed, shuffle=False)
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
+    loader = DataLoader(dataset, batch_size=args.batch_size,
+                        shuffle=(sampler is None), sampler=sampler)
 
     """ Model """
     model = DummyModel(in_dim=1, hidden_dim=args.hidden_dim, n_classes=args.n_classes)
